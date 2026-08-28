@@ -1,0 +1,27 @@
+services:
+  server:
+    build: ./server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    volumes:
+      - ./data:/data
+      - ./models:/models:ro
+      - whisper-cache:/cache
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+      LANGUAGE: ${LANGUAGE:-ru}
+      THREADS: ${THREADS:-8}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    restart: unless-stopped
+
+volumes:
+  whisper-cache:

@@ -1,0 +1,20 @@
+# секреты
+.env
+
+# данные и записи
+data/
+uploads/
+
+# модели (скачиваются scripts/download-models.sh)
+models/
+
+# node
+node_modules/
+
+# логи
+*.log
+
+# рабочие заметки
+skill-observations/
+
+__pycache__/
