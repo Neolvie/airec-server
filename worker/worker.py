@@ -23,7 +23,7 @@ STATE_FILE = os.path.join(TRANSCRIPTS, ".processed.json")
 MODEL = os.environ.get("WHISPER_MODEL", "medium")
 LANGUAGE = os.environ.get("LANGUAGE", "ru")
 THREADS = os.environ.get("THREADS", "8")
-CLUSTER_THRESHOLD = os.environ.get("DIAR_CLUSTER_THRESHOLD", "1.2")
+CLUSTER_THRESHOLD = os.environ.get("DIAR_CLUSTER_THRESHOLD", "auto")
 POLL_SEC = 5
 # Пауза после появления файла: пара wav+m4a одной записи должна успеть доехать
 SETTLE_SEC = 20

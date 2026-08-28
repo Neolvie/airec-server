@@ -142,3 +142,4 @@ curl -X POST http://localhost:8080/api/upload \
 | `AUDIO_RETENTION_DAYS` | `60` | Сколько дней хранить исходное аудио |
 | `DEEPSEEK_API_KEY` | — | Ключ DeepSeek для `*_fine.txt` (пусто — без причёсывания) |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | Модель DeepSeek |
+| `DIAR_CLUSTER_THRESHOLD` | `auto` | `auto` — адаптивный подбор числа говорящих; число — фиксированный порог кластеризации (меньше = больше говорящих) |

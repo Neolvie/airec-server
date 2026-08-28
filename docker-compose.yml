@@ -21,7 +21,7 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
-      DIAR_CLUSTER_THRESHOLD: ${DIAR_CLUSTER_THRESHOLD:-1.2}
+      DIAR_CLUSTER_THRESHOLD: ${DIAR_CLUSTER_THRESHOLD:-auto}
     restart: unless-stopped
 
 volumes:

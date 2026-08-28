@@ -106,13 +106,12 @@ SHERPA_EMB = os.path.join(MODELS_DIR,
                           "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx")
 
 
-def diarize_sherpa(wav, num_speakers, threads, cluster_threshold=1.3):
+def _sherpa_process(waveform, num_speakers, threads, cluster_threshold):
+    """Один проход sherpa-диаризации, возвращает интервалы с метками."""
     import sherpa_onnx
     for p in (SHERPA_SEG, SHERPA_EMB):
         if not os.path.exists(p):
             sys.exit(f"ОШИБКА: нет модели {p} — см. README, раздел про модели sherpa")
-    t0 = time.time()
-    log("[diar] sherpa-onnx: pyannote segmentation-3.0 + 3D-Speaker eres2net")
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
@@ -126,14 +125,188 @@ def diarize_sherpa(wav, num_speakers, threads, cluster_threshold=1.3):
         min_duration_off=0.5,
     )
     sd = sherpa_onnx.OfflineSpeakerDiarization(config)
-    waveform, sr = load_wav16k(wav)
-    assert sr == sd.sample_rate
+    assert sd.sample_rate == 16000
     segments = sd.process(waveform).sort_by_start_time()
-    turns = [{"start": s.start, "end": s.end, "speaker": f"SPK{s.speaker:02d}"}
-             for s in segments]
+    return [{"start": s.start, "end": s.end, "speaker": f"SPK{s.speaker:02d}"}
+            for s in segments]
+
+
+def diarize_sherpa(wav, num_speakers, threads, cluster_threshold=1.2):
+    t0 = time.time()
+    log("[diar] sherpa-onnx: pyannote segmentation-3.0 + 3D-Speaker eres2net")
+    waveform, sr = load_wav16k(wav)
+    turns = _sherpa_process(waveform, num_speakers, threads, cluster_threshold)
     speakers = sorted({t["speaker"] for t in turns})
     log(f"[diar] готово за {time.time() - t0:.0f}s: "
         f"{len(turns)} интервалов, {len(speakers)} говорящих")
+    return turns
+
+
+MIN_EMB_SEC = 0.6      # интервалы короче не эмбеддятся (метка от соседей)
+MAX_EMB_SEC = 20.0     # длинные интервалы режутся: эмбеддингу хватает
+ADAPTIVE_SIL_MIN = 0.12  # ниже — считаем, что говорящий один
+ADAPTIVE_SIL_MARGIN = 0.05  # берём наименьшее k в этой марже от максимума
+MIN_CLUSTER_SEC = 3.0    # кластер с меньшей суммарной речью — ложный
+MIN_CLUSTER_SHARE = 0.05  # ...или с меньшей долей от всей речи
+
+
+def _embed_turns(waveform, turns, threads):
+    """Эмбеддинг голоса (512-мерный) для каждого достаточно длинного интервала."""
+    import numpy as np
+    import sherpa_onnx
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+            model=SHERPA_EMB, num_threads=threads))
+    idx, embs = [], []
+    for i, t in enumerate(turns):
+        if t["end"] - t["start"] < MIN_EMB_SEC:
+            continue
+        a = int(t["start"] * 16000)
+        b = int(min(t["end"], t["start"] + MAX_EMB_SEC) * 16000)
+        stream = extractor.create_stream()
+        stream.accept_waveform(16000, waveform[a:b])
+        stream.input_finished()
+        v = np.array(extractor.compute(stream), dtype="float32")
+        n = np.linalg.norm(v)
+        if not n:
+            continue
+        idx.append(i)
+        embs.append(v / n)
+    return idx, np.array(embs)
+
+
+def _agglomerative_levels(dist, max_k):
+    """Агломеративная кластеризация (average linkage).
+
+    Возвращает {k: метки} для k = 1..max_k.
+    """
+    import numpy as np
+    n = len(dist)
+    d = dist.copy().astype("float64")
+    np.fill_diagonal(d, np.inf)
+    members = {i: [i] for i in range(n)}
+    levels = {}
+
+    def snapshot():
+        labels = np.empty(n, dtype=int)
+        for j, items in enumerate(members.values()):
+            labels[items] = j
+        return labels
+
+    if n <= max_k:
+        levels[n] = snapshot()
+    while len(members) > 1:
+        keys = list(members.keys())
+        sub = d[np.ix_(keys, keys)]
+        i, j = np.unravel_index(np.argmin(sub), sub.shape)
+        a, b = keys[i], keys[j]
+        na, nb = len(members[a]), len(members[b])
+        for k in members:
+            if k not in (a, b):
+                d[a, k] = d[k, a] = (na * d[a, k] + nb * d[b, k]) / (na + nb)
+        members[a].extend(members.pop(b))
+        d[b, :] = d[:, b] = np.inf
+        if len(members) <= max_k:
+            levels[len(members)] = snapshot()
+    return levels
+
+
+def _absorb_minor_clusters(labels, durs, dist, min_dur):
+    """Вливает кластеры с малой суммарной речью в ближайший крупный.
+
+    Возвращает (новые метки 0..k-1, k) или (None, 0), если крупных нет.
+    """
+    import numpy as np
+    labels = labels.copy()
+    clusters = sorted(set(labels))
+    share = {c: durs[labels == c].sum() for c in clusters}
+    major = [c for c in clusters if share[c] >= min_dur]
+    if not major:
+        return None, 0
+    major_masks = {c: labels == c for c in major}
+    for c in clusters:
+        if c in major:
+            continue
+        pts = labels == c
+        best = min(major, key=lambda m: dist[np.ix_(pts, major_masks[m])].mean())
+        labels[pts] = best
+    remap = {c: i for i, c in enumerate(sorted(set(labels)))}
+    return np.array([remap[c] for c in labels]), len(remap)
+
+
+def _silhouette(dist, labels):
+    """Средний silhouette-коэффициент; одиночные кластеры дают 0."""
+    import numpy as np
+    scores = []
+    for i in range(len(labels)):
+        same = labels == labels[i]
+        same[i] = False
+        if not same.any():
+            scores.append(0.0)
+            continue
+        a = dist[i][same].mean()
+        b = min(dist[i][labels == other].mean()
+                for other in set(labels) if other != labels[i])
+        scores.append((b - a) / max(a, b))
+    return float(np.mean(scores))
+
+
+def diarize_sherpa_adaptive(wav, threads, max_speakers=8):
+    """Диаризация с автоподбором числа говорящих.
+
+    Сегментация с низким порогом даёт мелкие чистые интервалы; на каждый
+    считается эмбеддинг голоса; число кластеров выбирается по максимуму
+    silhouette-коэффициента (при слабой кластерной структуре — один голос).
+    """
+    import numpy as np
+    t0 = time.time()
+    log("[diar] sherpa-onnx (adaptive): сегментация + автоподбор числа говорящих")
+    waveform, sr = load_wav16k(wav)
+    turns = _sherpa_process(waveform, None, threads, cluster_threshold=0.6)
+    log(f"[diar] сегментация: {len(turns)} интервалов")
+    if not turns:
+        return []
+    idx, embs = _embed_turns(waveform, turns, threads)
+    if len(embs) < 2:
+        for t in turns:
+            t["speaker"] = "SPK00"
+        return turns
+    dist = 1.0 - embs @ embs.T
+    np.clip(dist, 0.0, None, out=dist)
+    levels = _agglomerative_levels(dist, min(max_speakers, len(embs)))
+    durs = np.array([turns[i]["end"] - turns[i]["start"] for i in idx])
+    min_dur = max(MIN_CLUSTER_SEC, MIN_CLUSTER_SHARE * durs.sum())
+    candidates = []
+    seen = set()
+    for k, labels in sorted(levels.items()):
+        if k < 2:
+            continue
+        eff_labels, eff_k = _absorb_minor_clusters(labels, durs, dist, min_dur)
+        if eff_k < 2 or (eff_k, tuple(eff_labels)) in seen:
+            continue
+        seen.add((eff_k, tuple(eff_labels)))
+        sil = _silhouette(dist, eff_labels)
+        log(f"[diar] k={k} -> {eff_k} говорящих: silhouette={sil:.3f}")
+        candidates.append((eff_k, sil, eff_labels))
+    best_k, best_sil, final = 1, ADAPTIVE_SIL_MIN, np.zeros(len(embs), dtype=int)
+    if candidates:
+        top = max(c[1] for c in candidates)
+        if top > ADAPTIVE_SIL_MIN:
+            best_k, best_sil, final = min(
+                (c for c in candidates
+                 if c[1] >= top - ADAPTIVE_SIL_MARGIN and c[1] > ADAPTIVE_SIL_MIN),
+                key=lambda c: c[0])
+    for j, i in enumerate(idx):
+        turns[i]["speaker"] = f"SPK{final[j]:02d}"
+    embedded_idx = set(idx)
+    embedded = [turns[i] for i in idx]
+    for i, t in enumerate(turns):
+        if i not in embedded_idx:
+            nearest = min(embedded, key=lambda m: max(
+                m["start"] - t["end"], t["start"] - m["end"], 0.0))
+            t["speaker"] = nearest["speaker"]
+    log(f"[diar] готово за {time.time() - t0:.0f}s: {len(turns)} интервалов, "
+        f"{best_k} говорящих (silhouette={best_sil:.3f})")
     return turns
 
 
@@ -174,7 +347,7 @@ def diarize(wav, token, num_speakers, min_speakers=None, max_speakers=None):
     return turns
 
 
-def merge_minor_speakers(turns, min_sec=5.0, min_share=0.05):
+def merge_minor_speakers(turns, min_sec=MIN_CLUSTER_SEC, min_share=MIN_CLUSTER_SHARE):
     """Интервалы редких говорящих отдаёт ближайшему по времени основному.
 
     Убирает ложные кластеры из нескольких секунд речи (шум, смех,
@@ -257,8 +430,9 @@ def main():
                     choices=["tiny", "base", "small", "medium", "large-v3",
                              "large-v3-turbo", "turbo"])
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--cluster-threshold", type=float, default=1.2,
-                    help="sherpa, авторежим: порог слияния голосов "
+    ap.add_argument("--cluster-threshold", default="auto",
+                    help="sherpa: 'auto' — адаптивный подбор числа говорящих, "
+                         "либо число — порог слияния голосов "
                          "(больше = меньше говорящих)")
     ap.add_argument("--engine", default="sherpa", choices=["sherpa", "pyannote"],
                     help="движок диаризации: sherpa (onnx, без токена и torch) "
@@ -287,7 +461,8 @@ def main():
     if args.speakers:
         spk_spec = f"n{args.speakers}"
     elif args.engine == "sherpa":
-        spk_spec = f"auto-t{args.cluster_threshold}"
+        spk_spec = ("adaptive" if args.cluster_threshold == "auto"
+                    else f"auto-t{args.cluster_threshold}")
     else:
         spk_spec = f"auto{args.min_speakers or ''}-{args.max_speakers or ''}"
     diar_cache = f"{base}.diar.{args.engine}.{spk_spec}.json"
@@ -321,8 +496,13 @@ def main():
             wav = to_wav16k(src)
             try:
                 if args.engine == "sherpa":
-                    result = diarize_sherpa(wav, args.speakers, args.threads,
-                                            args.cluster_threshold)
+                    if not args.speakers and args.cluster_threshold == "auto":
+                        result = diarize_sherpa_adaptive(wav, args.threads)
+                    else:
+                        thr = (1.2 if args.cluster_threshold == "auto"
+                               else float(args.cluster_threshold))
+                        result = diarize_sherpa(wav, args.speakers,
+                                                args.threads, thr)
                 else:
                     result = diarize(wav, token, args.speakers,
                                      args.min_speakers, args.max_speakers)
