@@ -223,8 +223,8 @@ def process(rec_id, paths):
         empty = True
     if empty:
         log(f"[queue] пустая расшифровка {rec_id} — речи не найдено")
-        telegram_send(f"⚠️ {os.path.basename(rec_id)}: речи не распознано, "
-                      "файлы не создаю.", chat_id=chat)
+        telegram_send(f"⚠️ {os.path.basename(rec_id)}: речь в записи не найдена, "
+                      "расшифровку не создаю.", chat_id=chat)
         try:
             os.remove(tmp_out)
         except OSError:
