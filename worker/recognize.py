@@ -174,6 +174,31 @@ def diarize(wav, token, num_speakers, min_speakers=None, max_speakers=None):
     return turns
 
 
+def merge_minor_speakers(turns, min_sec=5.0, min_share=0.05):
+    """Интервалы редких говорящих отдаёт ближайшему по времени основному.
+
+    Убирает ложные кластеры из нескольких секунд речи (шум, смех,
+    наложение голосов); основные говорящие не трогаются.
+    """
+    dur = {}
+    for t in turns:
+        dur[t["speaker"]] = dur.get(t["speaker"], 0.0) + t["end"] - t["start"]
+    total = sum(dur.values())
+    if not total:
+        return turns
+    major = {s for s, d in dur.items() if d >= min_sec and d / total >= min_share}
+    if not major or len(major) == len(dur):
+        return turns
+    major_turns = [t for t in turns if t["speaker"] in major]
+    for t in turns:
+        if t["speaker"] not in major:
+            nearest = min(major_turns, key=lambda m: max(
+                m["start"] - t["end"], t["start"] - m["end"], 0.0))
+            t["speaker"] = nearest["speaker"]
+    log(f"[diar] ложные кластеры слиты: {len(dur)} -> {len(major)} говорящих")
+    return turns
+
+
 def assign_speakers(words, turns):
     """Каждому слову — говорящий с максимальным перекрытием по времени.
 
@@ -232,9 +257,9 @@ def main():
                     choices=["tiny", "base", "small", "medium", "large-v3",
                              "large-v3-turbo", "turbo"])
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--cluster-threshold", type=float, default=1.3,
+    ap.add_argument("--cluster-threshold", type=float, default=1.2,
                     help="sherpa, авторежим: порог слияния голосов "
-                         "(больше = меньше говорящих; 1.2 -> 3, 1.3 -> 2, 1.4 -> 1)")
+                         "(больше = меньше говорящих)")
     ap.add_argument("--engine", default="sherpa", choices=["sherpa", "pyannote"],
                     help="движок диаризации: sherpa (onnx, без токена и torch) "
                          "или pyannote (нужны torch и HF-токен)")
@@ -324,6 +349,7 @@ def main():
                     turns = json.load(f)
                 log(f"[кэш] интервалы: {len(turns)} из {diar_cache}")
 
+    turns = merge_minor_speakers(turns)
     labels = assign_speakers(words, turns)
     replicas = build_dialog(words, labels)
     write_dialog(replicas, dst)

@@ -23,6 +23,7 @@ STATE_FILE = os.path.join(TRANSCRIPTS, ".processed.json")
 MODEL = os.environ.get("WHISPER_MODEL", "medium")
 LANGUAGE = os.environ.get("LANGUAGE", "ru")
 THREADS = os.environ.get("THREADS", "8")
+CLUSTER_THRESHOLD = os.environ.get("DIAR_CLUSTER_THRESHOLD", "1.2")
 POLL_SEC = 5
 # Пауза после появления файла: пара wav+m4a одной записи должна успеть доехать
 SETTLE_SEC = 20
@@ -205,7 +206,8 @@ def process(rec_id, paths):
     t0 = time.time()
     cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "recognize.py"),
            src, "--model", MODEL, "--language", LANGUAGE,
-           "--threads", THREADS, "--out", tmp_out]
+           "--threads", THREADS, "--cluster-threshold", CLUSTER_THRESHOLD,
+           "--out", tmp_out]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         log(f"[queue] ОШИБКА распознавания {rec_id}:\n{result.stdout}\n{result.stderr}")
