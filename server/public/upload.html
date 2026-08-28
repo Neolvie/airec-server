@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIREC — загрузка</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; font-family: system-ui, sans-serif;
+    background: #111418; color: #e8eaed;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 28px 16px 60px; }
+  header { display: flex; align-items: center; justify-content: space-between; }
+  h1 { font-size: 22px; margin: 0; }
+  .logout {
+    background: none; border: 1px solid #3c4043; color: #9aa0a6;
+    border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  }
+  .drop {
+    margin-top: 26px; border: 2px dashed #3c4043; border-radius: 14px;
+    padding: 44px 20px; text-align: center; cursor: pointer; transition: .15s;
+    color: #9aa0a6;
+  }
+  .drop.over { border-color: #8ab4f8; background: #1b2026; color: #e8eaed; }
+  .drop b { color: #8ab4f8; }
+  .hint { font-size: 13px; color: #5f6368; margin-top: 10px; }
+  .progress { margin-top: 18px; display: none; }
+  .bar-outer { height: 8px; border-radius: 4px; background: #1b2026; overflow: hidden; }
+  .bar { height: 100%; width: 0; background: #8ab4f8; transition: width .2s; }
+  .progress .label { font-size: 13px; color: #9aa0a6; margin-top: 6px; }
+  .msg { margin-top: 14px; font-size: 14px; min-height: 20px; }
+  .msg.ok { color: #81c995; }
+  .msg.err { color: #f28b82; }
+  h2 { font-size: 15px; color: #9aa0a6; margin: 38px 0 10px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 9px 8px; border-bottom: 1px solid #1b2026; word-break: break-all; }
+  td.size, td.status { white-space: nowrap; text-align: right; color: #9aa0a6; }
+  .st-done { color: #81c995; }
+  .st-queued { color: #fdd663; }
+  .empty { color: #5f6368; font-size: 14px; padding: 16px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🎙 AIREC — загрузка записи</h1>
+    <button class="logout" id="logout">Выйти</button>
+  </header>
+
+  <div class="drop" id="drop">
+    Перетащите сюда аудио или видео<br>или <b>выберите файл</b>
+    <div class="hint">wav, m4a, mp3, ogg, mp4, mov, mkv… Результат придёт в Telegram.</div>
+  </div>
+  <input type="file" id="file" accept="audio/*,video/*" hidden>
+
+  <div class="progress" id="progress">
+    <div class="bar-outer"><div class="bar" id="bar"></div></div>
+    <div class="label" id="plabel"></div>
+  </div>
+  <div class="msg" id="msg"></div>
+
+  <h2>Последние загрузки</h2>
+  <div id="list"><div class="empty">Пока пусто</div></div>
+</div>
+<script>
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const progress = document.getElementById('progress');
+const bar = document.getElementById('bar');
+const plabel = document.getElementById('plabel');
+const msg = document.getElementById('msg');
+
+function fmtSize(bytes) {
+  if (bytes >= 1 << 30) return (bytes / (1 << 30)).toFixed(1) + ' ГБ';
+  if (bytes >= 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' МБ';
+  return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
+}
+
+function setMsg(text, ok) {
+  msg.textContent = text;
+  msg.className = 'msg ' + (ok ? 'ok' : 'err');
+}
+
+function uploadFile(file) {
+  msg.textContent = '';
+  progress.style.display = 'block';
+  bar.style.width = '0';
+  plabel.textContent = `${file.name} (${fmtSize(file.size)})`;
+  const fd = new FormData();
+  fd.append('file', file);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/web/upload');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%';
+  };
+  xhr.onload = () => {
+    progress.style.display = 'none';
+    if (xhr.status === 401) { location.reload(); return; }
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status === 200 && data.ok) {
+      setMsg(`✅ ${data.name} — в очереди на распознавание, результат придёт в Telegram`, true);
+      refresh();
+    } else {
+      setMsg('❌ ' + (data.error || `Ошибка загрузки (${xhr.status})`), false);
+    }
+  };
+  xhr.onerror = () => {
+    progress.style.display = 'none';
+    setMsg('❌ Сервер недоступен', false);
+  };
+  xhr.send(fd);
+}
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+  fileInput.value = '';
+});
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+
+async function refresh() {
+  try {
+    const resp = await fetch('/web/uploads');
+    if (resp.status === 401) { location.reload(); return; }
+    const items = await resp.json();
+    const list = document.getElementById('list');
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">Пока пусто</div>';
+      return;
+    }
+    const rows = items.map((it) => {
+      const st = it.status === 'done'
+        ? '<span class="st-done">расшифровано</span>'
+        : '<span class="st-queued">в очереди</span>';
+      return `<tr><td>${it.name}</td><td class="size">${fmtSize(it.size)}</td>` +
+             `<td class="status">${st}</td></tr>`;
+    }).join('');
+    list.innerHTML = `<table>${rows}</table>`;
+  } catch {}
+}
+
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/logout', { method: 'POST' });
+  location.reload();
+});
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIREC — вход</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; font-family: system-ui, sans-serif;
+    background: #111418; color: #e8eaed;
+  }
+  .card {
+    width: min(360px, 92vw); padding: 32px 28px; border-radius: 14px;
+    background: #1b2026; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  p.sub { margin: 0 0 24px; color: #9aa0a6; font-size: 14px; }
+  label { display: block; font-size: 13px; color: #9aa0a6; margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 10px 12px; border-radius: 8px; font-size: 15px;
+    border: 1px solid #3c4043; background: #111418; color: #e8eaed;
+  }
+  input:focus { outline: none; border-color: #8ab4f8; }
+  button {
+    width: 100%; margin-top: 22px; padding: 11px; border: none; border-radius: 8px;
+    background: #8ab4f8; color: #111418; font-size: 15px; font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .error { margin-top: 14px; color: #f28b82; font-size: 14px; min-height: 18px; }
+</style>
+</head>
+<body>
+<form class="card" id="form">
+  <h1>🎙 AIREC</h1>
+  <p class="sub">Загрузка записей на распознавание</p>
+  <label for="login">Логин</label>
+  <input id="login" name="login" autocomplete="username" required>
+  <label for="password">Пароль</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button id="btn" type="submit">Войти</button>
+  <div class="error" id="error"></div>
+</form>
+<script>
+const form = document.getElementById('form');
+const btn = document.getElementById('btn');
+const errorEl = document.getElementById('error');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  btn.disabled = true;
+  errorEl.textContent = '';
+  try {
+    const resp = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        login: document.getElementById('login').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    if (resp.ok) { location.reload(); return; }
+    const data = await resp.json().catch(() => ({}));
+    errorEl.textContent = data.error || 'Ошибка входа';
+  } catch {
+    errorEl.textContent = 'Сервер недоступен';
+  }
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>

@@ -347,9 +347,12 @@ def handle_tg_message(msg):
     file_id, name, size = found
     if size and size > TG_MAX_FILE_BYTES:
         log(f"[telegram] файл {name} слишком велик ({size} байт)")
+        web_url = os.environ.get("WEB_URL")
+        hint = (f"Загрузите запись через диктофон или страницу {web_url}"
+                if web_url else "Загрузите запись через диктофон/сервер.")
         telegram_send(
             f"❌ «{name}» весит {size / 1024 / 1024:.0f} МБ, а Telegram Bot API "
-            "отдаёт боту только до 20 МБ. Загрузите запись через диктофон/сервер.",
+            f"отдаёт боту только до 20 МБ. {hint}",
             chat_id=chat_id)
         return
     stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(msg.get("date", time.time())))

@@ -4,9 +4,11 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY server.js ./
+COPY server.js auth.js ./
+COPY public ./public
 
 ENV UPLOAD_DIR=/data/incoming \
+    TRANSCRIPTS_DIR=/data/transcripts \
     PORT=8080
 
 EXPOSE 8080
