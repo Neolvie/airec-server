@@ -58,20 +58,18 @@ def to_wav16k(src, normalize=False):
     return wav
 
 
-def transcribe(wav, model_name, language, threads, batch_size):
-    import inspect
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+def transcribe(wav, model_name, language, threads):
+    from faster_whisper import WhisperModel
     t0 = time.time()
     log(f"[whisper] загрузка модели '{model_name}' (CPU, int8, threads={threads})")
     model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=threads)
-    pipe = BatchedInferencePipeline(model=model)
-    log(f"[whisper] модель готова за {time.time() - t0:.0f}s, распознаю (batch={batch_size})...")
-    kwargs = dict(language=language, vad_filter=True, word_timestamps=True,
-                  condition_on_previous_text=False, no_speech_threshold=0.9,
-                  log_prob_threshold=-2.0, batch_size=batch_size)
-    accepted = set(inspect.signature(pipe.transcribe).parameters)
-    kwargs = {k: v for k, v in kwargs.items() if k in accepted}
-    segments, info = pipe.transcribe(wav, **kwargs)
+    log(f"[whisper] модель готова за {time.time() - t0:.0f}s, распознаю...")
+    segments, info = model.transcribe(
+        wav, language=language, vad_filter=True, word_timestamps=True,
+        condition_on_previous_text=False, no_speech_threshold=0.9,
+        log_prob_threshold=-2.0,
+        vad_parameters=dict(threshold=0.25, min_silence_duration_ms=1000,
+                            speech_pad_ms=200))
     words = []
     last_logged = 0
     for seg in segments:
@@ -429,7 +427,6 @@ def main():
     ap.add_argument("--model", default="base",
                     choices=["tiny", "base", "small", "medium", "large-v3",
                              "large-v3-turbo", "turbo"])
-    ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--cluster-threshold", default="auto",
                     help="sherpa: 'auto' — адаптивный подбор числа говорящих, "
                          "либо число — порог слияния голосов "
@@ -483,8 +480,7 @@ def main():
             log(f"[ffmpeg] конвертация + speechnorm: {src}")
             wav = to_wav16k(src, normalize=True)
             try:
-                result = transcribe(wav, args.model, args.language,
-                                    args.threads, args.batch_size)
+                result = transcribe(wav, args.model, args.language, args.threads)
             finally:
                 os.remove(wav)
             with open(words_cache, "w", encoding="utf-8") as f:
