@@ -9,7 +9,7 @@ faster-whisper + диаризация sherpa-onnx (кто что сказал), 
 
 ```
 диктофон AIREC ──POST /api/upload──▶ server (Node) ──▶ data/incoming/
-Telegram-бот  ──voice/audio/файл──▶ worker (poll)  ──▶ data/incoming/telegram/
+Telegram-бот  ──voice/видео/файл──▶ worker (poll)  ──▶ data/incoming/telegram/
                                                           │
                                           worker: whisper + диаризация
                                                           │
@@ -22,9 +22,12 @@ Telegram-бот  ──voice/audio/файл──▶ worker (poll)  ──▶ da
 
 - `*_source.txt` — расшифровка как есть: таймкоды, роли «Собеседник N».
 - `*_fine.txt` — тот же текст без повторов и слов-паразитов, роли сохранены.
-- Аудио, присланное боту напрямую (voice, audio, документ-аудио: wav/m4a/mp3/ogg/…,
-  до 20 МБ — лимит Telegram Bot API), проходит тот же цикл; ответ уходит отправителю.
-  Принимаются только сообщения из чата `TELEGRAM_CHAT_ID`, остальные игнорируются.
+- Запись, присланная боту напрямую, проходит тот же цикл; ответ уходит
+  отправителю. Принимаются голосовые, кружки, аудио и видео — файлом или
+  вложением: wav/m4a/mp3/ogg/opus/aac/flac и mp4/m4v/mov/mkv/webm/avi/3gp
+  (из видео берётся звуковая дорожка), до 20 МБ — лимит Telegram Bot API.
+  На вложение, в котором звука нет, бот отвечает подсказкой. Принимаются
+  только сообщения из чата `TELEGRAM_CHAT_ID`, остальные игнорируются.
 - Исходное аудио хранится `AUDIO_RETENTION_DAYS` дней, расшифровки — всегда.
 
 ## API
@@ -137,8 +140,8 @@ curl -X POST http://localhost:8080/api/upload \
 | `WHISPER_MODEL` | `medium` | Модель faster-whisper (`small` — быстрее, `large-v3` — точнее) |
 | `LANGUAGE` | `ru` | Язык распознавания |
 | `THREADS` | `8` | Потоки CPU на распознавание |
-| `TELEGRAM_BOT_TOKEN` | — | Токен бота (уведомления + приём аудио) |
-| `TELEGRAM_CHAT_ID` | — | Чат для уведомлений; только из него принимается аудио |
+| `TELEGRAM_BOT_TOKEN` | — | Токен бота (уведомления + приём записей) |
+| `TELEGRAM_CHAT_ID` | — | Чат для уведомлений; только из него принимаются записи |
 | `AUDIO_RETENTION_DAYS` | `60` | Сколько дней хранить исходное аудио |
 | `DEEPSEEK_API_KEY` | — | Ключ DeepSeek для `*_fine.txt` (пусто — без причёсывания) |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | Модель DeepSeek |

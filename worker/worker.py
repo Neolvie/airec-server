@@ -4,7 +4,8 @@
 через DeepSeek (refine.py) и складывает в папку транскриптов два файла:
 *_source.txt (сырой диалог) и *_fine.txt (нормализованный). При наличии
 TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID шлёт уведомления и файлы в Telegram.
-Также принимает аудио, присланные боту в Telegram, и гонит их по тому же циклу.
+Также принимает аудио и видео, присланные боту в Telegram, и гонит их по
+тому же циклу.
 """
 import json
 import os
@@ -83,6 +84,8 @@ def nice_name(rec_id, dialog_path):
     return f"{stamp}_{topic_slug(dialog_path)}"
 
 AUDIO_EXT = {".wav", ".m4a", ".mp3", ".ogg", ".opus", ".aac", ".flac"}
+VIDEO_EXT = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".3gp"}
+MEDIA_EXT = AUDIO_EXT | VIDEO_EXT
 
 
 def log(msg):
@@ -113,12 +116,12 @@ def recording_id(path):
 
 
 def scan_recordings():
-    """Группирует входящие аудиофайлы по записям: id -> список путей."""
+    """Группирует входящие медиафайлы по записям: id -> список путей."""
     recordings = {}
     for root, _, files in os.walk(INCOMING):
         for name in files:
             path = os.path.join(root, name)
-            if os.path.splitext(name)[1].lower() not in AUDIO_EXT:
+            if os.path.splitext(name)[1].lower() not in MEDIA_EXT:
                 continue
             recordings.setdefault(recording_id(path), []).append(path)
     return recordings
@@ -248,6 +251,9 @@ def process(rec_id, paths):
 
 TG_OFFSET_FILE = os.path.join(TRANSCRIPTS, ".tg_offset")
 TG_MAX_FILE_BYTES = 20 * 1024 * 1024  # лимит Bot API на скачивание файлов
+# Типы вложений, на которые бот отвечает, даже если взять из них нечего
+ATTACHMENT_KEYS = ("voice", "audio", "video", "video_note", "document",
+                   "animation", "photo", "sticker")
 
 
 def tg_api(method, params=None, timeout=30):
@@ -276,8 +282,9 @@ def save_tg_offset(offset):
         f.write(str(offset))
 
 
-def extract_tg_audio(msg):
-    """(file_id, имя, размер) из voice/audio/audio-document, иначе None."""
+def extract_tg_media(msg):
+    """(file_id, имя, размер) из voice/audio/video/video_note или документа
+    с аудио- либо видеодорожкой, иначе None."""
     voice = msg.get("voice")
     if voice:
         return voice["file_id"], "voice.ogg", voice.get("file_size", 0)
@@ -285,12 +292,20 @@ def extract_tg_audio(msg):
     if audio:
         return (audio["file_id"], audio.get("file_name") or "audio.m4a",
                 audio.get("file_size", 0))
+    video = msg.get("video")
+    if video:
+        return (video["file_id"], video.get("file_name") or "video.mp4",
+                video.get("file_size", 0))
+    note = msg.get("video_note")
+    if note:
+        return note["file_id"], "video_note.mp4", note.get("file_size", 0)
     doc = msg.get("document")
     if doc:
         name = doc.get("file_name") or ""
         mime = doc.get("mime_type") or ""
-        if mime.startswith("audio/") or os.path.splitext(name)[1].lower() in AUDIO_EXT:
-            return doc["file_id"], name or "audio.bin", doc.get("file_size", 0)
+        if (mime.startswith(("audio/", "video/"))
+                or os.path.splitext(name)[1].lower() in MEDIA_EXT):
+            return doc["file_id"], name or "media.bin", doc.get("file_size", 0)
     return None
 
 
@@ -318,13 +333,24 @@ def handle_tg_message(msg):
     if allowed and str(chat_id) != str(allowed):
         log(f"[telegram] игнорирую сообщение из чужого чата {chat_id}")
         return
-    found = extract_tg_audio(msg)
+    found = extract_tg_media(msg)
     if not found:
+        attachment = next((k for k in ATTACHMENT_KEYS if msg.get(k)), None)
+        if attachment:
+            log(f"[telegram] вложение без звуковой дорожки ({attachment}) "
+                f"из чата {chat_id}")
+            telegram_send(
+                "🤔 Не вижу здесь записи со звуком. Пришлите голосовое, кружок "
+                "или файл с аудио/видео (wav, m4a, mp3, ogg, mp4, mov, mkv…).",
+                chat_id=chat_id)
         return
     file_id, name, size = found
     if size and size > TG_MAX_FILE_BYTES:
-        telegram_send("❌ Файл больше 20 МБ — Telegram Bot API не даёт его скачать. "
-                      "Загрузите запись через диктофон/сервер.", chat_id=chat_id)
+        log(f"[telegram] файл {name} слишком велик ({size} байт)")
+        telegram_send(
+            f"❌ «{name}» весит {size / 1024 / 1024:.0f} МБ, а Telegram Bot API "
+            "отдаёт боту только до 20 МБ. Загрузите запись через диктофон/сервер.",
+            chat_id=chat_id)
         return
     stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(msg.get("date", time.time())))
     base, ext = os.path.splitext(sanitize_name(name))
@@ -332,7 +358,7 @@ def handle_tg_message(msg):
         ext = ".ogg"
     rec_name = f"{stamp}_{base}" if base else stamp
     dest = os.path.join(INCOMING, "telegram", rec_name + (ext.lower() or ".ogg"))
-    log(f"[telegram] скачиваю аудио из чата {chat_id}: {name}")
+    log(f"[telegram] скачиваю из чата {chat_id}: {name}")
     try:
         download_tg_file(file_id, dest)
     except Exception as e:
@@ -378,9 +404,9 @@ def cleanup_old_audio(processed):
             if os.path.getmtime(path) > cutoff:
                 continue
             ext = os.path.splitext(name)[1].lower()
-            if ext in AUDIO_EXT and recording_id(path) not in processed:
+            if ext in MEDIA_EXT and recording_id(path) not in processed:
                 continue
-            if ext not in AUDIO_EXT and ext != ".json":
+            if ext not in MEDIA_EXT and ext != ".json":
                 continue
             try:
                 os.remove(path)
