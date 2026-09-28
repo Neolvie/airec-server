@@ -35,10 +35,21 @@
   .msg.err { color: #f28b82; }
   h2 { font-size: 15px; color: #9aa0a6; margin: 38px 0 10px; font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  td { padding: 9px 8px; border-bottom: 1px solid #1b2026; word-break: break-all; }
+  td {
+    padding: 9px 8px; border-bottom: 1px solid #1b2026; word-break: break-all;
+    vertical-align: top;
+  }
   td.size, td.status { white-space: nowrap; text-align: right; color: #9aa0a6; }
-  .st-done { color: #81c995; }
+  .st-ok { color: #81c995; }
   .st-queued { color: #fdd663; }
+  .st-error { color: #f28b82; }
+  .st-empty, .st-processed { color: #9aa0a6; }
+  .dl { margin-top: 6px; word-break: normal; }
+  .dl a {
+    display: inline-block; margin-right: 14px; color: #8ab4f8;
+    text-decoration: none; font-size: 13px;
+  }
+  .dl a:hover { text-decoration: underline; }
   .empty { color: #5f6368; font-size: 14px; padding: 16px 0; }
 </style>
 </head>
@@ -51,7 +62,7 @@
 
   <div class="drop" id="drop">
     Перетащите сюда аудио или видео<br>или <b>выберите файл</b>
-    <div class="hint">wav, m4a, mp3, ogg, mp4, mov, mkv… Результат придёт в Telegram.</div>
+    <div class="hint">wav, m4a, mp3, ogg, mp4, mov, mkv… Расшифровку можно скачать ниже, копия придёт в Telegram.</div>
   </div>
   <input type="file" id="file" accept="audio/*,video/*" hidden>
 
@@ -78,6 +89,19 @@ function fmtSize(bytes) {
   return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
 }
 
+const STATUS_LABELS = {
+  queued: 'в очереди',
+  ok: 'расшифровано',
+  empty: 'речь не найдена',
+  error: 'ошибка',
+  processed: 'обработано',
+};
+const DOWNLOAD_LABELS = { source: 'исходный', fine: 'причёсанный' };
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
 function setMsg(text, ok) {
   msg.textContent = text;
   msg.className = 'msg ' + (ok ? 'ok' : 'err');
@@ -101,7 +125,7 @@ function uploadFile(file) {
     let data = {};
     try { data = JSON.parse(xhr.responseText); } catch {}
     if (xhr.status === 200 && data.ok) {
-      setMsg(`✅ ${data.name} — в очереди на распознавание, результат придёт в Telegram`, true);
+      setMsg(`✅ ${data.name} — в очереди на распознавание, результат появится ниже и в Telegram`, true);
       refresh();
     } else {
       setMsg('❌ ' + (data.error || `Ошибка загрузки (${xhr.status})`), false);
@@ -138,10 +162,16 @@ async function refresh() {
       return;
     }
     const rows = items.map((it) => {
-      const st = it.status === 'done'
-        ? '<span class="st-done">расшифровано</span>'
-        : '<span class="st-queued">в очереди</span>';
-      return `<tr><td>${it.name}</td><td class="size">${fmtSize(it.size)}</td>` +
+      const label = STATUS_LABELS[it.status] || STATUS_LABELS.queued;
+      const st = `<span class="st-${esc(it.status)}">${label}</span>`;
+      const links = Object.entries(DOWNLOAD_LABELS)
+        .filter(([kind]) => it.files && it.files[kind])
+        .map(([kind, text]) => {
+          const href = `/web/download?name=${encodeURIComponent(it.name)}&kind=${kind}`;
+          return `<a href="${href}" download title="${esc(it.files[kind])}">⬇ ${text}</a>`;
+        }).join('');
+      const dl = links ? `<div class="dl">${links}</div>` : '';
+      return `<tr><td>${esc(it.name)}${dl}</td><td class="size">${fmtSize(it.size)}</td>` +
              `<td class="status">${st}</td></tr>`;
     }).join('');
     list.innerHTML = `<table>${rows}</table>`;

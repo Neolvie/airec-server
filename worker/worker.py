@@ -21,6 +21,8 @@ import refine
 INCOMING = os.environ.get("INCOMING_DIR", "/data/incoming")
 TRANSCRIPTS = os.environ.get("TRANSCRIPTS_DIR", "/data/transcripts")
 STATE_FILE = os.path.join(TRANSCRIPTS, ".processed.json")
+# Итог обработки: rec_id -> {status: ok|empty|error, source, fine}; читает веб-сервер
+RESULTS_FILE = os.path.join(TRANSCRIPTS, ".results.json")
 MODEL = os.environ.get("WHISPER_MODEL", "medium")
 LANGUAGE = os.environ.get("LANGUAGE", "ru")
 THREADS = os.environ.get("THREADS", "8")
@@ -76,11 +78,15 @@ def topic_slug(dialog_path, max_words=3):
     return "-".join(words) if words else "zapis"
 
 
+def name_stamp(rec_id):
+    """2026-08-27_13-05 из yyyyMMddHHmm в начале имени записи или None."""
+    m = re.match(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})", os.path.basename(rec_id))
+    return f"{m[1]}-{m[2]}-{m[3]}_{m[4]}-{m[5]}" if m else None
+
+
 def nice_name(rec_id, dialog_path):
     """2026-08-27_13-05_tema-zapisi из yyyyMMddHHmmss и текста (без расширения)."""
-    base = os.path.basename(rec_id)
-    m = re.match(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})", base)
-    stamp = f"{m[1]}-{m[2]}-{m[3]}_{m[4]}-{m[5]}" if m else base
+    stamp = name_stamp(rec_id) or os.path.basename(rec_id)
     return f"{stamp}_{topic_slug(dialog_path)}"
 
 AUDIO_EXT = {".wav", ".m4a", ".mp3", ".ogg", ".opus", ".aac", ".flac"}
@@ -104,6 +110,62 @@ def save_state(state):
     os.makedirs(TRANSCRIPTS, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(state), f, ensure_ascii=False, indent=0)
+
+
+def load_results():
+    try:
+        with open(RESULTS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_results(results):
+    """Пишет через временный файл: сервер читает .results.json в любой момент."""
+    os.makedirs(TRANSCRIPTS, exist_ok=True)
+    tmp = RESULTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(tmp, RESULTS_FILE)
+
+
+def transcript_rel(path):
+    """Путь расшифровки относительно TRANSCRIPTS с прямыми слешами."""
+    return os.path.relpath(path, TRANSCRIPTS).replace("\\", "/")
+
+
+def backfill_results(processed, results):
+    """Находит расшифровки записей, обработанных до появления .results.json.
+
+    Сопоставляет по метке времени в имени, только если в папке одна такая
+    запись и один *_source.txt с этой меткой. Возвращает число добавленных.
+    """
+    by_stamp = {}
+    for rec_id in processed:
+        stamp = name_stamp(rec_id)
+        if stamp:
+            by_stamp.setdefault((os.path.dirname(rec_id), stamp), []).append(rec_id)
+    added = 0
+    for (sub, stamp), rec_ids in by_stamp.items():
+        if len(rec_ids) != 1 or rec_ids[0] in results:
+            continue
+        out_dir = os.path.join(TRANSCRIPTS, sub)
+        try:
+            names = set(os.listdir(out_dir))
+        except OSError:
+            continue
+        sources = [n for n in names
+                   if n.startswith(stamp + "_") and n.endswith("_source.txt")]
+        if len(sources) != 1:
+            continue
+        fine = sources[0][: -len("_source.txt")] + "_fine.txt"
+        results[rec_ids[0]] = {
+            "status": "ok",
+            "source": transcript_rel(os.path.join(out_dir, sources[0])),
+            "fine": transcript_rel(os.path.join(out_dir, fine)) if fine in names else None,
+        }
+        added += 1
+    return added
 
 
 def recording_id(path):
@@ -216,7 +278,7 @@ def process(rec_id, paths):
         log(f"[queue] ОШИБКА распознавания {rec_id}:\n{result.stdout}\n{result.stderr}")
         telegram_send(f"❌ Ошибка распознавания {rec_id}:\n{result.stderr[-500:]}",
                       chat_id=chat)
-        return False
+        return {"status": "error"}
     try:
         empty = not open(tmp_out, encoding="utf-8").read().strip()
     except OSError:
@@ -229,7 +291,7 @@ def process(rec_id, paths):
             os.remove(tmp_out)
         except OSError:
             pass
-        return True
+        return {"status": "empty"}
     base = os.path.join(out_dir or TRANSCRIPTS, nice_name(rec_id, tmp_out))
     source_out = base + "_source.txt"
     fine_out = base + "_fine.txt"
@@ -246,7 +308,8 @@ def process(rec_id, paths):
     else:
         telegram_send("⚠️ Причёсанную версию сделать не удалось (ошибка DeepSeek)",
                       chat_id=chat)
-    return True
+    return {"status": "ok", "source": transcript_rel(source_out),
+            "fine": transcript_rel(fine_out) if has_fine else None}
 
 
 TG_OFFSET_FILE = os.path.join(TRANSCRIPTS, ".tg_offset")
@@ -422,6 +485,11 @@ def main():
     log(f"worker запущен: {INCOMING} -> {TRANSCRIPTS}, model={MODEL}, "
         f"хранение аудио {AUDIO_RETENTION_DAYS} дн.")
     processed = load_state()
+    results = load_results()
+    added = backfill_results(processed, results)
+    if added:
+        save_results(results)
+        log(f"[results] старым записям сопоставлены расшифровки: {added}")
     last_cleanup = 0
     while True:
         try:
@@ -432,13 +500,10 @@ def main():
             for rec_id, paths in sorted(scan_recordings().items()):
                 if rec_id in processed or not is_settled(paths):
                     continue
-                if process(rec_id, paths):
-                    processed.add(rec_id)
-                    save_state(processed)
-                else:
-                    # не ретраим бесконечно: помечаем, чтобы не зациклиться
-                    processed.add(rec_id)
-                    save_state(processed)
+                results[rec_id] = process(rec_id, paths)
+                save_results(results)
+                processed.add(rec_id)
+                save_state(processed)
         except Exception as e:
             log(f"[queue] ошибка цикла: {e}")
         time.sleep(POLL_SEC)
